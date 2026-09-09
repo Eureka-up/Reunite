@@ -7,6 +7,7 @@ from urllib.request import Request, urlopen
 
 import gradio as gr
 import numpy as np
+import spaces
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -47,24 +48,26 @@ def download_model():
 
 def load_model():
     download_model()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint = torch.load(MODEL_PATH, map_location=device)
+    checkpoint = torch.load(MODEL_PATH, map_location="cpu")
     if isinstance(checkpoint, dict):
         checkpoint = checkpoint.get("state_dict", checkpoint.get("model_state_dict", checkpoint))
-    model = Siamese().to(device)
+    model = Siamese()
     model.load_state_dict(checkpoint)
     model.eval()
-    return model, device
+    return model
 
-model, device = load_model()
+model = load_model()
 preprocess = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor()])
 
+@spaces.GPU
 def embed(image):
     if image is None:
         raise gr.Error("Image data is required.")
     if not isinstance(image, Image.Image):
         image = Image.fromarray(np.asarray(image))
     image = image.convert("RGB")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
     tensor = preprocess(image).unsqueeze(0).to(device)
     with torch.inference_mode():
         vector = model(tensor).squeeze(0).cpu().numpy().astype(np.float32)

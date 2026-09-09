@@ -29,7 +29,7 @@ JWT_ALGORITHM = "HS256"
 AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "reunite_session")
 AUTH_SESSION_DAYS = int(os.getenv("AUTH_SESSION_DAYS", "7"))
 AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "true" if os.getenv("ENVIRONMENT", "development").lower() == "production" else "false").lower() == "true"
-AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "lax").lower()
+AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "none" if os.getenv("ENVIRONMENT", "development").lower() == "production" else "lax").lower()
 if AUTH_COOKIE_SAMESITE not in {"lax", "strict", "none"}: AUTH_COOKIE_SAMESITE = "lax"
 pool = ConnectionPool(DB_URL, min_size=1, max_size=int(os.getenv("DB_POOL_MAX", "10")), kwargs={"row_factory": dict_row}, open=False)
 app = FastAPI(title="Reunite API", version="1.0.0")

@@ -1,11 +1,13 @@
-/* Keep landing-page calls to action compact on phones; full width is reserved for transactional actions. */
+/* Buttons remain content-sized on small screens; full width belongs to fields, not actions. */
 @media (max-width:640px){
-  .hero-actions{display:flex;flex-direction:column;align-items:flex-start;gap:10px}
-  .hero-actions .btn{width:auto;min-width:0}
+  .hero-actions,.cta-actions,.detail-actions,.search-controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+  .hero-actions .btn,.cta-actions .btn,.detail-actions .btn,.search-controls .btn,.admin-toolbar .btn,.donation-card>.btn{width:auto!important;min-width:0}
   .hero-actions .btn:first-child{min-width:154px}
-  .cta-actions .btn,.detail-actions .btn,.search-controls .btn,.admin-toolbar .btn{width:100%}
+  .search-controls{align-items:flex-start}.admin-toolbar{align-items:flex-start}.admin-toolbar .btn{align-self:flex-start}
+  .settings-actions .btn,.profile-form .btn,.report-form .btn{align-self:flex-start;width:auto}
+  .confirm-actions{display:flex;justify-content:flex-start}.confirm-actions button{width:auto}
 }
 
 @media (max-width:390px){
-  .hero-actions .btn{font-size:11px;padding-inline:14px}
+  .hero-actions .btn,.cta-actions .btn,.detail-actions .btn{font-size:11px;padding-inline:14px}
 }

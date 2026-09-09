@@ -18,7 +18,8 @@ function SessionBootstrap() {
     const expired = () => {
       markSessionKnown(false);
       setReady(false);
-      window.location.hash = "login";
+      window.history.pushState({}, "", "/login");
+      window.dispatchEvent(new PopStateEvent("popstate"));
       restore();
     };
     window.addEventListener("reunite-session-expired", expired);

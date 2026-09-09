@@ -12,5 +12,5 @@ COPY . .
 ENV EMBEDDING_MODEL_PATH=/app/model/encoder.pth
 RUN python download_model.py
 
-EXPOSE 10000
-CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT:-10000}"]
+EXPOSE 8000
+CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT:-8000}"]

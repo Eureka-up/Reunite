@@ -1,0 +1,26 @@
+# secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node/build output
+node_modules/
+Frontend/dist/
+Frontend/.vite/
+
+# ML artifacts can be large; add the production model through Git LFS or a release asset.
+*.pt
+*.pth
+*.ckpt
+
+# local tooling
+.DS_Store
+.idea/
+.vscode/

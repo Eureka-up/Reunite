@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os, re, secrets, uuid, json
+import os, re, uuid, json, tempfile
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -14,12 +14,12 @@ import numpy as np
 from dotenv import load_dotenv
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
+from gradio_client import Client, handle_file
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 load_dotenv(Path(__file__).with_name('.env'))
-import core
 DB_URL = os.getenv("DATABASE_URL") or f"host={os.getenv('DB_HOST')} port={os.getenv('DB_PORT','5432')} dbname={os.getenv('DB_NAME','postgres')} user={os.getenv('DB_USER')} password={os.getenv('DB_PASSWORD')} sslmode=require"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -32,6 +32,11 @@ AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "true" if os.getenv("ENVIRO
 AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "none" if os.getenv("ENVIRONMENT", "development").lower() == "production" else "lax").lower()
 if AUTH_COOKIE_SAMESITE not in {"lax", "strict", "none"}: AUTH_COOKIE_SAMESITE = "lax"
 pool = ConnectionPool(DB_URL, min_size=1, max_size=int(os.getenv("DB_POOL_MAX", "10")), kwargs={"row_factory": dict_row}, open=False)
+EMBEDDING_DIM = 512
+AI_SPACE = os.getenv("AI_SPACE", "")
+AI_TOKEN = os.getenv("AI_TOKEN", "")
+AI_API_NAME = os.getenv("AI_API_NAME", "/embed")
+ai_client = None
 app = FastAPI(title="Reunite API", version="1.0.0")
 logger = logging.getLogger("reunite")
 origins = [x.strip() for x in os.getenv("FRONTEND_URL", "http://localhost:5173").split(",")]
@@ -45,9 +50,11 @@ class PgVectorRepository:
         self.database_url = database_url
 
     def upsert_embedding(self, record_id: str, embedding: list[float]) -> None:
-        vector = core.serialize_embedding(embedding)
+        vector = np.asarray(embedding, dtype=np.float32)
+        if vector.ndim != 1 or vector.size != EMBEDDING_DIM:
+            raise ValueError(f"Expected a {EMBEDDING_DIM}-dimension embedding.")
         with psycopg.connect(self.database_url) as connection:
-            connection.execute("INSERT INTO embedding (photo_id, vector) VALUES (%s, %s)", (record_id, vector))
+            connection.execute("INSERT INTO embedding (photo_id, vector) VALUES (%s, %s)", (record_id, vector.tobytes()))
 
     def search_by_embedding(self, embedding: list[float], *, limit: int, threshold: float):
         vector = np.asarray(embedding, dtype=np.float32)
@@ -55,17 +62,38 @@ class PgVectorRepository:
             rows = connection.execute("SELECT e.photo_id, r.report_id, r.kind, e.vector FROM embedding e JOIN photo p ON p.photo_id=e.photo_id JOIN report r ON r.report_id=p.report_id WHERE r.status='OPEN'").fetchall()
         matches = []
         for photo_id, report_id, kind, raw in rows:
-            candidate = core.deserialize_embedding(raw)
-            if candidate.shape != vector.shape:
+            candidate = np.frombuffer(bytes(raw), dtype=np.float32)
+            if candidate.size != EMBEDDING_DIM or candidate.shape != vector.shape:
                 continue
             denominator = np.linalg.norm(vector) * np.linalg.norm(candidate)
             if denominator == 0:
                 continue
             similarity = float(np.dot(vector, candidate) / denominator)
             if similarity >= threshold:
-                matches.append(core.SearchMatch(record_id=str(photo_id), similarity=similarity, metadata={"report_id": str(report_id), "kind": kind}))
-        return sorted(matches, key=lambda item: item.similarity, reverse=True)[:limit]
+                matches.append({"record_id": str(photo_id), "similarity": similarity, "metadata": {"report_id": str(report_id), "kind": kind}})
+        return sorted(matches, key=lambda item: item["similarity"], reverse=True)[:limit]
 
+def embedding_repository() -> PgVectorRepository:
+    return PgVectorRepository(DB_URL)
+
+def ai_embedding(image_bytes: bytes, filename: str = "image.jpg") -> list[float]:
+    global ai_client
+    if not AI_SPACE:
+        raise RuntimeError("AI_SPACE is not configured.")
+    if ai_client is None:
+        ai_client = Client(AI_SPACE, token=AI_TOKEN or None)
+    suffix = Path(filename).suffix or ".jpg"
+    with tempfile.NamedTemporaryFile(suffix=suffix) as image_file:
+        image_file.write(image_bytes)
+        image_file.flush()
+        result = ai_client.predict(image=handle_file(image_file.name), api_name=AI_API_NAME)
+    if isinstance(result, tuple):
+        result = result[0]
+    if isinstance(result, dict) and "embedding" in result:
+        result = result["embedding"]
+    if not isinstance(result, list) or len(result) != EMBEDDING_DIM:
+        raise ValueError(f"AI service returned an invalid {EMBEDDING_DIM}-dimension embedding.")
+    return [float(value) for value in result]
 def embedding_repository() -> PgVectorRepository:
     return PgVectorRepository(DB_URL)
 
@@ -152,8 +180,6 @@ def admin_user(user=Depends(current_user)):
 def startup():
     pool.open(wait=True)
     with pool.connection() as c: c.execute("SELECT 1")
-    try: core.embedding_service.warm_up()
-    except Exception as error: logger.error("Embedding model initialization failed: %s", error)
 
 @app.on_event("shutdown")
 def shutdown(): pool.close()
@@ -198,14 +224,10 @@ def health(): return {"success": True, "data": {"status": "ok", "service": "reun
 @app.get("/api/ready")
 def readiness():
     database_ready = False
-    model_ready = False
+    model_ready = bool(AI_SPACE)
     try:
         with pool.connection() as connection: connection.execute("SELECT 1")
         database_ready = True
-    except Exception: pass
-    try:
-        core.embedding_service.warm_up()
-        model_ready = True
     except Exception: pass
     if not database_ready or not model_ready:
         raise HTTPException(503, {"database": database_ready, "model": model_ready})
@@ -214,37 +236,38 @@ def readiness():
 @app.post("/api/embeddings")
 async def create_embedding(image: UploadFile = File(...)):
     try:
-        embedding = core.embed_image(await image.read())
+        embedding = ai_embedding(await image.read(), image.filename or "image.jpg")
         return {"success": True, "data": {"dimension": len(embedding), "embedding": embedding}}
-    except core.EmbeddingError as error:
+    except ValueError as error:
         raise HTTPException(422, str(error)) from error
-    except FileNotFoundError as error:
-        raise HTTPException(503, str(error)) from error
+    except Exception as error:
+        raise HTTPException(503, "AI service is unavailable.") from error
 
 @app.post("/api/embeddings/store")
 async def store_embedding(record_id: str = Form(...), image: UploadFile = File(...), metadata_json: str = Form("{}")):
     try:
         metadata = json.loads(metadata_json)
         if not isinstance(metadata, dict): raise ValueError("metadata_json must be a JSON object.")
-        embedding = core.embed_image(await image.read())
+        embedding = ai_embedding(await image.read(), image.filename or "image.jpg")
         embedding_repository().upsert_embedding(record_id, embedding)
         return {"success": True, "data": {"record_id": record_id, "dimension": len(embedding), "stored": True}}
     except json.JSONDecodeError as error:
         raise HTTPException(422, "metadata_json must be valid JSON.") from error
-    except core.EmbeddingError as error:
+    except ValueError as error:
         raise HTTPException(422, str(error)) from error
-    except FileNotFoundError as error:
-        raise HTTPException(503, str(error)) from error
+    except Exception as error:
+        raise HTTPException(503, "AI service is unavailable.") from error
 
 @app.post("/api/embeddings/search")
 async def search_embeddings(image: UploadFile = File(...), limit: int = Form(5), threshold: float = Form(0.38)):
     try:
-        matches = core.embedding_service.search(await image.read(), embedding_repository(), limit=limit, threshold=threshold)
-        return {"success": True, "data": {"matches": [match.__dict__ for match in matches]}}
-    except core.EmbeddingError as error:
+        embedding = ai_embedding(await image.read(), image.filename or "image.jpg")
+        matches = embedding_repository().search_by_embedding(embedding, limit=limit, threshold=threshold)
+        return {"success": True, "data": {"matches": matches}}
+    except ValueError as error:
         raise HTTPException(422, str(error)) from error
-    except FileNotFoundError as error:
-        raise HTTPException(503, str(error)) from error
+    except Exception as error:
+        raise HTTPException(503, "AI service is unavailable.") from error
 
 @app.post("/api/auth/signup")
 def signup(body: AuthBody, response: Response):
@@ -458,7 +481,7 @@ async def upload_photo(report_id: int, file: UploadFile = File(...), user=Depend
         row = c.execute('INSERT INTO photo (report_id,path,uploaded_at) VALUES (%s,%s,now()) RETURNING photo_id,report_id,path,uploaded_at', (report_id, name)).fetchone()
     embedding_status = "not_generated"
     try:
-        embedding_repository().upsert_embedding(str(row["photo_id"]), core.embed_image(data))
+        embedding_repository().upsert_embedding(str(row["photo_id"]), ai_embedding(data, file.filename or "image.jpg"))
         embedding_status = "stored"
     except Exception:
         embedding_status = "failed"
@@ -477,15 +500,16 @@ def delete_photo(photo_id: int, user=Depends(current_user)):
 async def search_photo(file: UploadFile = File(...)):
     if file.content_type not in ("image/jpeg", "image/png", "image/webp"): raise HTTPException(422, "Only image files are allowed.")
     try:
-        matches = [match.__dict__ for match in core.embedding_service.search(await file.read(), embedding_repository())]
-    except FileNotFoundError as error:
-        raise HTTPException(503, "Embedding model is not configured.") from error
-    except core.EmbeddingError as error:
+        embedding = ai_embedding(await file.read(), file.filename or "image.jpg")
+        matches = embedding_repository().search_by_embedding(embedding, limit=5, threshold=0.38)
+    except ValueError as error:
         raise HTTPException(422, str(error)) from error
+    except Exception as error:
+        raise HTTPException(503, "AI service is unavailable.") from error
     result = []
     with pool.connection() as c:
         for match in matches:
-            row = c.execute('SELECT r.*, json_build_array(json_build_object(\'id\',p.photo_id,\'path\',p.path)) AS photos FROM photo p JOIN report r ON r.report_id=p.report_id WHERE p.photo_id=%s AND r.status=\'OPEN\'', (match.get("record_id"),)).fetchone()
+            row = c.execute("SELECT r.*, json_build_array(json_build_object('id',p.photo_id,'path',p.path)) AS photos FROM photo p JOIN report r ON r.report_id=p.report_id WHERE p.photo_id=%s AND r.status='OPEN'", (match.get("record_id"),)).fetchone()
             if row: result.append({"report": normalize_report(row), "similarity": match.get("similarity")})
     return {"success": True, "data": result}
 

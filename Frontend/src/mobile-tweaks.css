@@ -1,0 +1,11 @@
+/* Keep landing-page calls to action compact on phones; full width is reserved for transactional actions. */
+@media (max-width:640px){
+  .hero-actions{display:flex;flex-direction:column;align-items:flex-start;gap:10px}
+  .hero-actions .btn{width:auto;min-width:0}
+  .hero-actions .btn:first-child{min-width:154px}
+  .cta-actions .btn,.detail-actions .btn,.search-controls .btn,.admin-toolbar .btn{width:100%}
+}
+
+@media (max-width:390px){
+  .hero-actions .btn{font-size:11px;padding-inline:14px}
+}

@@ -19,7 +19,7 @@ function SessionBootstrap() {
       markSessionKnown(false);
       setReady(false);
       window.history.pushState({}, "", "/login");
-      window.dispatchEvent(new PopStateEvent("popstate"));
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
       restore();
     };
     window.addEventListener("reunite-session-expired", expired);
